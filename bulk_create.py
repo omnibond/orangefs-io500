@@ -50,6 +50,7 @@ class OBOptions:
             "prefix": args.client_prefix
         }
 
+        self.list_instances = args.list_instances
 
 def initialize_parser():
     parser = argparse.ArgumentParser()
@@ -124,6 +125,10 @@ def initialize_parser():
             type=int,
             default=0,
             help="number of local SSDs to attach to each server instance")
+    parser.add_argument(
+            "--list-instances",
+            action="store_true",
+            help="include the names of the created instances in the output")
 
     return parser
 
@@ -252,6 +257,44 @@ def wait_for_operation(compute, operation, opts):
                 raise Exception(result['error'])
             return result
 
+# Get the names of all instances created by a bulkInsert request
+#
+# Does this by finding all insert operations that match a given group_id
+# (i.e. the operationGroupId associated with a bulkInsert request)
+#
+# Returns a list of instance names
+def get_instances_from_group_id(compute, group_id, opts):
+    filter_expr = f"operationType=insert AND operationGroupId={group_id}"
+    try:
+        # get a list of insert operations that match the operationGroupId
+        op_list = compute.zoneOperations().list(
+            project=opts.project,
+            zone=opts.zone,
+            filter=filter_expr).execute()
+    except googleapiclient.errors.HttpError as e:
+        error_msg = json.loads(e.content).get("error").get("message")
+        print(f"Warning: Unable to retrieve operation list")
+        print(f"Error: {error_msg}")
+        # sys.exit(1)
+
+    # TODO: error handling
+    instances = []
+    for item in op_list['items']:
+        # parse the instance name from the end of the url
+        instance_name = item['targetLink'].rsplit(sep='/', maxsplit=1)[1]
+        instances.append(instance_name)
+
+    return instances
+
+def prGreen(s):
+    print(f"\033[92m{s}\033[00m")
+
+def print_instance_list(instance_list):
+    for instance_name in instance_list:
+        # TODO: could do a class of colors instead - probably better
+        # print(f"{Colors.GREEN}{instance_name}{Colors.END}")
+        prGreen(instance_name)
+
 def create_instances(compute, opts, network_interface, inst_type):
     if inst_type == OBInstType.SERVER:
         is_server = True
@@ -281,7 +324,10 @@ def create_instances(compute, opts, network_interface, inst_type):
         print(f"Error: {error_msg}")
         sys.exit(1)
 
-    wait_for_operation(compute, operation, opts)
+    result = wait_for_operation(compute, operation, opts)
+    return get_instances_from_group_id(compute,
+                                       result['operationGroupId'],
+                                       opts)
 
 if __name__ == "__main__":
     parser = initialize_parser()
@@ -310,6 +356,10 @@ if __name__ == "__main__":
     net_int = setup_network_interface(ob_opts)
 
     if args.num_servers > 0:
-        create_instances(compute, ob_opts, net_int, OBInstType.SERVER)
+        servers = create_instances(compute, ob_opts, net_int, OBInstType.SERVER)
+        if ob_opts.list_instances:
+            print_instance_list(servers)
     if args.num_clients > 0:
-        create_instances(compute, ob_opts, net_int, OBInstType.CLIENT)
+        clients = create_instances(compute, ob_opts, net_int, OBInstType.CLIENT)
+        if ob_opts.list_instances:
+            print_instance_list(clients)
